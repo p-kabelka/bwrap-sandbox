@@ -1,29 +1,56 @@
 #!/bin/bash
-# Grant a running sandbox access to an additional host directory.
+# Grant a running sandbox access to an additional host directory or file.
 # Must be run as root (sudo). Paths are mirrored by default.
 #
-# Usage: sudo ./sandbox-grant.sh <session> <path> [sandbox-path]
+# Usage: sudo ./sandbox-grant.sh [options] <session> <path> [sandbox-path]
 #   session:      sandbox session name (from sandbox-start.sh --name)
-#   path:         host directory to grant access to
+#   path:         host directory/file to grant access to
 #   sandbox-path: path inside the sandbox (default: same as host path)
 #
+# Options:
+#   --ro              Mount read-only
+#   --hide <relpath>  Hide a relative path within the mounted directory
+#                     (can be specified multiple times)
+#
 # Examples:
-#   sudo ./sandbox-grant.sh myproject /home/user/other-project
-#   sudo ./sandbox-grant.sh myproject /opt/data /home/user/data
+#   sudo ./sandbox-grant.sh myproject /home/user/project
+#   sudo ./sandbox-grant.sh myproject --ro /home/user/reference
+#   sudo ./sandbox-grant.sh myproject /home/user/project --hide .env --hide .secrets
 
 set -euo pipefail
 
 SESSIONS_FILE="/tmp/sandbox-info.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
-    echo "Usage: sudo $0 <session> <path> [sandbox-path]" >&2
+# Parse options
+READONLY=""
+HIDE_ARGS=()
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ro)
+            READONLY=1
+            shift
+            ;;
+        --hide)
+            HIDE_ARGS+=(-H "$2")
+            shift 2
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ ${#POSITIONAL[@]} -lt 2 || ${#POSITIONAL[@]} -gt 3 ]]; then
+    echo "Usage: sudo $0 [--ro] [--hide path]... <session> <path> [sandbox-path]" >&2
     exit 1
 fi
 
-SESSION_NAME="$1"
-HOST_PATH="$2"
-SANDBOX_PATH="${3:-$HOST_PATH}"
+SESSION_NAME="${POSITIONAL[0]}"
+HOST_PATH="${POSITIONAL[1]}"
+SANDBOX_PATH="${POSITIONAL[2]:-$HOST_PATH}"
 
 if [[ ! -e "$HOST_PATH" ]]; then
     echo "Error: $HOST_PATH does not exist" >&2
@@ -87,7 +114,12 @@ else
     touch "$SANDBOX_HOME/$RELATIVE"
 fi
 
+# Build sandbox-mount arguments
+MOUNT_ARGS=()
+[[ -n "$READONLY" ]] && MOUNT_ARGS+=(-r)
+MOUNT_ARGS+=("${HIDE_ARGS[@]}")
+
 # Inject the mount using open_tree() + move_mount()
-"$SCRIPT_DIR/sandbox-mount" "$PID" "$HOST_PATH" "$SANDBOX_PATH"
+"$SCRIPT_DIR/sandbox-mount" "${MOUNT_ARGS[@]}" "$PID" "$HOST_PATH" "$SANDBOX_PATH"
 
 echo "Granted: $HOST_PATH -> $SANDBOX_PATH (session: $SESSION_NAME)"
