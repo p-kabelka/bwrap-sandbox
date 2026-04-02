@@ -47,15 +47,23 @@ fi
 # Unmount
 nsenter -t "$PID" --mount -- umount "$SANDBOX_PATH"
 
-# Clean up the empty mount point directory on the host-backed filesystem
+# Clean up empty mount point directories on the host-backed filesystem,
+# but only if the corresponding sandbox path has no remaining mounts
+# (e.g., a hide mount may still be stacked at the same path).
+is_sandbox_mountpoint() {
+    awk -v path="$1" '$5 == path { found=1; exit } END { exit !found }' \
+        "/proc/$PID/mountinfo" 2>/dev/null
+}
+
 RELATIVE="${SANDBOX_PATH#"$HOME_PREFIX"/}"
 if [[ "$RELATIVE" != "$SANDBOX_PATH" ]]; then
-    # Remove empty mount point and any empty parents up to SANDBOX_HOME root
-    rmdir "$SANDBOX_HOME/$RELATIVE" 2>/dev/null || true
-    PARENT="$(dirname "$SANDBOX_HOME/$RELATIVE")"
-    while [[ "$PARENT" != "$SANDBOX_HOME" && "$PARENT" != "/" ]]; do
-        rmdir "$PARENT" 2>/dev/null || break
-        PARENT="$(dirname "$PARENT")"
+    CURRENT="$RELATIVE"
+    while [[ -n "$CURRENT" && "$CURRENT" != "." ]]; do
+        if is_sandbox_mountpoint "$HOME_PREFIX/$CURRENT"; then
+            break
+        fi
+        rmdir "$SANDBOX_HOME/$CURRENT" 2>/dev/null || break
+        CURRENT="$(dirname "$CURRENT")"
     done
 fi
 

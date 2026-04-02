@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <linux/mount.h>
 #include <sched.h>
+#include <sys/mount.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,27 @@ static int sys_fsconfig(int fd, unsigned int cmd,
 static int sys_fsmount(int fd, unsigned int flags, unsigned int attr_flags)
 {
     return syscall(SYS_fsmount, fd, flags, attr_flags);
+}
+
+/*
+ * Set a detached mount's propagation to MS_PRIVATE.
+ * Prevents mount events from propagating to peer mounts,
+ * which can cause duplicate mounts when the target is
+ * under a shared mount.
+ * Returns 0 on success, -1 on error.
+ */
+static int set_mount_private(int fd_mount)
+{
+    struct mount_attr attr = {
+        .propagation = MS_PRIVATE,
+    };
+    if (sys_mount_setattr(fd_mount, "", AT_EMPTY_PATH,
+                          &attr, sizeof(attr)) < 0) {
+        fprintf(stderr, "mount_setattr(MS_PRIVATE): %s\n",
+                strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -241,10 +263,31 @@ int main(int argc, char *argv[])
     fd_mntns = -1;
 
     /*
+     * Step 3.5: Make all mounts in the sandbox recursively private.
+     * bwrap's bind mounts inherit shared propagation from the host
+     * filesystem, causing move_mount() to create duplicate mounts
+     * in peer mounts. Making the tree private prevents this.
+     * This is idempotent — already-private mounts are unaffected.
+     */
+    if (mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) {
+        fprintf(stderr, "mount(MS_REC|MS_PRIVATE): %s\n",
+                strerror(errno));
+        rc = 1;
+        goto cleanup;
+    }
+
+    /*
      * Step 4: Attach the detached mount at the target path.
      * The target directory must already exist (created by the caller
      * on the host-backed filesystem before invoking this helper).
+     *
+     * Set propagation to private first — shared propagation from the
+     * parent mount would cause duplicate mounts in peer mounts.
      */
+    if (set_mount_private(fd_tree) < 0) {
+        rc = 1;
+        goto cleanup;
+    }
     if (sys_move_mount(fd_tree, "", AT_FDCWD, sandbox_path,
                        MOVE_MOUNT_F_EMPTY_PATH) < 0) {
         fprintf(stderr, "move_mount(%s): %s\n",
@@ -298,6 +341,11 @@ int main(int argc, char *argv[])
             goto cleanup;
         }
 
+        if (set_mount_private(fd_mask) < 0) {
+            close(fd_mask);
+            rc = 1;
+            goto cleanup;
+        }
         if (sys_move_mount(fd_mask, "", AT_FDCWD, hide_target,
                            MOVE_MOUNT_F_EMPTY_PATH) < 0) {
             fprintf(stderr, "move_mount(hide %s): %s\n",
