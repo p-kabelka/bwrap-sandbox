@@ -41,17 +41,12 @@ static int sys_open_tree(int dirfd, const char *path, unsigned int flags)
     return syscall(SYS_open_tree, dirfd, path, flags);
 }
 
-static int sys_move_mount(int from_dirfd, const char *from_path,
-                          int to_dirfd, const char *to_path,
-                          unsigned int flags)
+static int sys_move_mount(int from_dirfd, const char *from_path, int to_dirfd, const char *to_path, unsigned int flags)
 {
-    return syscall(SYS_move_mount, from_dirfd, from_path,
-                   to_dirfd, to_path, flags);
+    return syscall(SYS_move_mount, from_dirfd, from_path, to_dirfd, to_path, flags);
 }
 
-static int sys_mount_setattr(int dirfd, const char *path,
-                             unsigned int flags,
-                             struct mount_attr *attr, size_t size)
+static int sys_mount_setattr(int dirfd, const char *path, unsigned int flags, struct mount_attr *attr, size_t size)
 {
     return syscall(SYS_mount_setattr, dirfd, path, flags, attr, size);
 }
@@ -61,8 +56,7 @@ static int sys_fsopen(const char *fsname, unsigned int flags)
     return syscall(SYS_fsopen, fsname, flags);
 }
 
-static int sys_fsconfig(int fd, unsigned int cmd,
-                        const char *key, const void *value, int aux)
+static int sys_fsconfig(int fd, unsigned int cmd, const char *key, const void *value, int aux)
 {
     return syscall(SYS_fsconfig, fd, cmd, key, value, aux);
 }
@@ -89,10 +83,8 @@ static int set_mount_private(int fd_mount)
     struct mount_attr attr = {
         .propagation = MS_PRIVATE,
     };
-    if (sys_mount_setattr(fd_mount, "", AT_EMPTY_PATH,
-                          &attr, sizeof(attr)) < 0) {
-        fprintf(stderr, "mount_setattr(MS_PRIVATE): %s\n",
-                strerror(errno));
+    if (sys_mount_setattr(fd_mount, "", AT_EMPTY_PATH, &attr, sizeof(attr)) < 0) {
+        fprintf(stderr, "mount_setattr(MS_PRIVATE): %s\n", strerror(errno));
         return -1;
     }
     return 0;
@@ -105,10 +97,10 @@ static int set_mount_private(int fd_mount)
  */
 static int create_devnull_clone(void)
 {
-    int fd = sys_open_tree(AT_FDCWD, "/dev/null",
-                           OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
-    if (fd < 0)
+    int fd = sys_open_tree(AT_FDCWD, "/dev/null", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+    if (fd < 0) {
         fprintf(stderr, "open_tree(/dev/null): %s\n", strerror(errno));
+    }
     return fd;
 }
 
@@ -212,11 +204,11 @@ int main(int argc, char *argv[])
      */
     pidfd = sys_pidfd_open(pid, 0);
     if (pidfd < 0) {
-        if (errno == ENOSYS)
+        if (errno == ENOSYS) {
             fprintf(stderr, "pidfd_open: not supported (kernel < 5.3)\n");
-        else
-            fprintf(stderr, "pidfd_open(%d): %s (process gone?)\n",
-                    pid, strerror(errno));
+        } else {
+            fprintf(stderr, "pidfd_open(%d): %s (process gone?)\n", pid, strerror(errno));
+        }
         rc = 1;
         goto cleanup;
     }
@@ -236,16 +228,11 @@ int main(int argc, char *argv[])
         rc = 1;
         goto cleanup;
     }
-    fd_tree = sys_open_tree(fd_path, "",
-                            OPEN_TREE_CLONE |
-                            OPEN_TREE_CLOEXEC |
-                            AT_RECURSIVE |
-                            AT_EMPTY_PATH);
+    fd_tree = sys_open_tree(fd_path, "", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE | AT_EMPTY_PATH);
     close(fd_path);
     fd_path = -1;
     if (fd_tree < 0) {
-        fprintf(stderr, "open_tree(%s): %s\n",
-                host_path, strerror(errno));
+        fprintf(stderr, "open_tree(%s): %s\n", host_path, strerror(errno));
         rc = 1;
         goto cleanup;
     }
@@ -257,10 +244,8 @@ int main(int argc, char *argv[])
         struct mount_attr attr = {
             .attr_set = MOUNT_ATTR_RDONLY,
         };
-        if (sys_mount_setattr(fd_tree, "", AT_EMPTY_PATH,
-                              &attr, sizeof(attr)) < 0) {
-            fprintf(stderr, "mount_setattr(RDONLY): %s\n",
-                    strerror(errno));
+        if (sys_mount_setattr(fd_tree, "", AT_EMPTY_PATH, &attr, sizeof(attr)) < 0) {
+            fprintf(stderr, "mount_setattr(RDONLY): %s\n", strerror(errno));
             rc = 1;
             goto cleanup;
         }
@@ -282,20 +267,22 @@ int main(int argc, char *argv[])
     fd_mntns = open(ns_path, O_RDONLY | O_CLOEXEC);
     if (fd_mntns < 0) {
         fprintf(stderr, "open(%s): %s\n", ns_path, strerror(errno));
-        if (errno == ENOENT)
+        if (errno == ENOENT) {
             fprintf(stderr, "  (process %d does not exist)\n", pid);
+        }
         rc = 1;
         goto cleanup;
     }
 
     if (setns(fd_mntns, CLONE_NEWNS) < 0) {
         fprintf(stderr, "setns(CLONE_NEWNS): %s\n", strerror(errno));
-        if (errno == EPERM)
+        if (errno == EPERM) {
             fprintf(stderr,
                     "  Possible causes:\n"
                     "  - Not running as root\n"
                     "  - SELinux is blocking setns "
                     "(check: sudo ausearch -m avc -ts recent)\n");
+        }
         rc = 1;
         goto cleanup;
     }
@@ -312,8 +299,7 @@ int main(int argc, char *argv[])
      * This is idempotent — already-private mounts are unaffected.
      */
     if (mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) {
-        fprintf(stderr, "mount(MS_REC|MS_PRIVATE): %s\n",
-                strerror(errno));
+        fprintf(stderr, "mount(MS_REC|MS_PRIVATE): %s\n", strerror(errno));
         rc = 1;
         goto cleanup;
     }
@@ -342,14 +328,11 @@ int main(int argc, char *argv[])
         stopped = 1;
     }
 
-    if (sys_move_mount(fd_tree, "", AT_FDCWD, sandbox_path,
-                       MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-        fprintf(stderr, "move_mount(%s): %s\n",
-                sandbox_path, strerror(errno));
-        if (errno == ENOENT)
-            fprintf(stderr,
-                    "  (target directory does not exist "
-                    "in the sandbox)\n");
+    if (sys_move_mount(fd_tree, "", AT_FDCWD, sandbox_path, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+        fprintf(stderr, "move_mount(%s): %s\n", sandbox_path, strerror(errno));
+        if (errno == ENOENT) {
+            fprintf(stderr, "  (target directory does not exist in the sandbox)\n");
+        }
         rc = 1;
         goto cleanup;
     }
@@ -370,26 +353,21 @@ int main(int argc, char *argv[])
      */
     char hide_target[PATH_MAX];
     for (int i = 0; i < hide_count; i++) {
-        int n = snprintf(hide_target, sizeof(hide_target), "%s/%s",
-                         sandbox_path, hide_paths[i]);
+        int n = snprintf(hide_target, sizeof(hide_target), "%s/%s", sandbox_path, hide_paths[i]);
         if (n < 0 || (size_t)n >= sizeof(hide_target)) {
-            fprintf(stderr, "Error: hide path too long: %s/%s\n",
-                    sandbox_path, hide_paths[i]);
+            fprintf(stderr, "Error: hide path too long: %s/%s\n", sandbox_path, hide_paths[i]);
             rc = 1;
             goto cleanup;
         }
 
         struct stat st;
         if (stat(hide_target, &st) < 0) {
-            fprintf(stderr, "stat(%s): %s\n",
-                    hide_target, strerror(errno));
+            fprintf(stderr, "stat(%s): %s\n", hide_target, strerror(errno));
             rc = 1;
             goto cleanup;
         }
 
-        int fd_mask = S_ISDIR(st.st_mode)
-            ? create_empty_tmpfs()
-            : create_devnull_clone();
+        int fd_mask = S_ISDIR(st.st_mode) ? create_empty_tmpfs() : create_devnull_clone();
         if (fd_mask < 0) {
             rc = 1;
             goto cleanup;
@@ -400,14 +378,11 @@ int main(int argc, char *argv[])
             rc = 1;
             goto cleanup;
         }
-        if (sys_move_mount(fd_mask, "", AT_FDCWD, hide_target,
-                           MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-            fprintf(stderr, "move_mount(hide %s): %s\n",
-                    hide_target, strerror(errno));
-            if (errno == ENOENT)
-                fprintf(stderr,
-                        "  (path '%s' does not exist under '%s')\n",
-                        hide_paths[i], sandbox_path);
+        if (sys_move_mount(fd_mask, "", AT_FDCWD, hide_target, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+            fprintf(stderr, "move_mount(hide %s): %s\n", hide_target, strerror(errno));
+            if (errno == ENOENT) {
+                fprintf(stderr, "  (path '%s' does not exist under '%s')\n", hide_paths[i], sandbox_path);
+            }
             close(fd_mask);
             rc = 1;
             goto cleanup;
@@ -421,16 +396,21 @@ int main(int argc, char *argv[])
     }
 
 cleanup:
-    if (stopped)
+    if (stopped) {
         kill(pid, SIGCONT);
-    if (fd_path >= 0)
+    }
+    if (fd_path >= 0) {
         close(fd_path);
-    if (fd_tree >= 0)
+    }
+    if (fd_tree >= 0) {
         close(fd_tree);
-    if (fd_mntns >= 0)
+    }
+    if (fd_mntns >= 0) {
         close(fd_mntns);
-    if (pidfd >= 0)
+    }
+    if (pidfd >= 0) {
         close(pidfd);
+    }
     free(hide_paths);
     return rc;
 }
