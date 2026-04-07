@@ -16,9 +16,8 @@
  *   Must be run as root (CAP_SYS_ADMIN in the initial user namespace).
  *
  * Note: hide operations (-H) are applied immediately after the main mount.
- * There is a brief window (microseconds) between the main move_mount() and
- * the hide move_mount() calls during which the hidden paths are visible to
- * the sandboxed process. There is no kernel API to do this atomically.
+ * The sandbox process is frozen with SIGSTOP during the mount+hide sequence
+ * to prevent it from observing hidden paths before they are masked.
  */
 
 #define _GNU_SOURCE
@@ -33,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <signal.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -70,6 +70,11 @@ static int sys_fsconfig(int fd, unsigned int cmd,
 static int sys_fsmount(int fd, unsigned int flags, unsigned int attr_flags)
 {
     return syscall(SYS_fsmount, fd, flags, attr_flags);
+}
+
+static int sys_pidfd_open(pid_t pid, unsigned int flags)
+{
+    return syscall(SYS_pidfd_open, pid, flags);
 }
 
 /*
@@ -153,8 +158,11 @@ int main(int argc, char *argv[])
     int rc = 0;
     int readonly = 0;
     int hide_count = 0;
+    int fd_path = -1;
     int fd_tree = -1;
     int fd_mntns = -1;
+    int pidfd = -1;
+    int stopped = 0;
 
     /* Allocate upfront — can't have more -H flags than argc entries */
     const char **hide_paths = calloc(argc, sizeof(*hide_paths));
@@ -185,12 +193,30 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    int pid = atoi(argv[optind]);
+    char *endptr;
+    errno = 0;
+    long pid_long = strtol(argv[optind], &endptr, 10);
+    if (errno || *endptr != '\0' || pid_long <= 0 || pid_long > INT_MAX) {
+        fprintf(stderr, "Error: invalid PID '%s'\n", argv[optind]);
+        rc = 1;
+        goto cleanup;
+    }
+    int pid = (int)pid_long;
     const char *host_path = argv[optind + 1];
     const char *sandbox_path = argv[optind + 2];
 
-    if (pid <= 0) {
-        fprintf(stderr, "Error: invalid PID '%s'\n", argv[optind]);
+    /*
+     * Pin the PID to prevent recycling between our check and setns().
+     * pidfd_open() returns an fd that holds a reference to the process.
+     * Requires Linux 5.3+.
+     */
+    pidfd = sys_pidfd_open(pid, 0);
+    if (pidfd < 0) {
+        if (errno == ENOSYS)
+            fprintf(stderr, "pidfd_open: not supported (kernel < 5.3)\n");
+        else
+            fprintf(stderr, "pidfd_open(%d): %s (process gone?)\n",
+                    pid, strerror(errno));
         rc = 1;
         goto cleanup;
     }
@@ -198,11 +224,25 @@ int main(int argc, char *argv[])
     /*
      * Step 1: Clone the source mount while in the host namespace.
      * The result is a "detached" mount not belonging to any namespace.
+     *
+     * Open the path with O_PATH first to resolve symlinks atomically
+     * in the kernel, then clone from the resulting fd. This prevents
+     * a TOCTOU race where the path could be swapped between a shell-side
+     * realpath() and the open_tree() call.
      */
-    fd_tree = sys_open_tree(AT_FDCWD, host_path,
+    fd_path = open(host_path, O_PATH | O_CLOEXEC);
+    if (fd_path < 0) {
+        fprintf(stderr, "open(%s): %s\n", host_path, strerror(errno));
+        rc = 1;
+        goto cleanup;
+    }
+    fd_tree = sys_open_tree(fd_path, "",
                             OPEN_TREE_CLONE |
                             OPEN_TREE_CLOEXEC |
-                            AT_RECURSIVE);
+                            AT_RECURSIVE |
+                            AT_EMPTY_PATH);
+    close(fd_path);
+    fd_path = -1;
     if (fd_tree < 0) {
         fprintf(stderr, "open_tree(%s): %s\n",
                 host_path, strerror(errno));
@@ -261,6 +301,8 @@ int main(int argc, char *argv[])
     }
     close(fd_mntns);
     fd_mntns = -1;
+    close(pidfd);
+    pidfd = -1;
 
     /*
      * Step 3.5: Make all mounts in the sandbox recursively private.
@@ -288,6 +330,18 @@ int main(int argc, char *argv[])
         rc = 1;
         goto cleanup;
     }
+
+    /* Freeze the sandbox process during mount+hide to eliminate the
+     * race window where hidden paths are briefly visible. */
+    if (hide_count > 0) {
+        if (kill(pid, SIGSTOP) < 0) {
+            fprintf(stderr, "kill(%d, SIGSTOP): %s\n", pid, strerror(errno));
+            rc = 1;
+            goto cleanup;
+        }
+        stopped = 1;
+    }
+
     if (sys_move_mount(fd_tree, "", AT_FDCWD, sandbox_path,
                        MOVE_MOUNT_F_EMPTY_PATH) < 0) {
         fprintf(stderr, "move_mount(%s): %s\n",
@@ -311,8 +365,8 @@ int main(int argc, char *argv[])
      * The concatenated path cannot exceed PATH_MAX — the kernel
      * rejects any path >= PATH_MAX in syscalls anyway.
      *
-     * Note: there is a brief race window between the main mount
-     * (step 4) and these hide mounts where the paths are visible.
+     * The sandbox process is frozen (SIGSTOP) during the mount+hide
+     * sequence to prevent observing hidden paths before they are masked.
      */
     char hide_target[PATH_MAX];
     for (int i = 0; i < hide_count; i++) {
@@ -361,11 +415,22 @@ int main(int argc, char *argv[])
         close(fd_mask);
     }
 
+    if (stopped) {
+        kill(pid, SIGCONT);
+        stopped = 0;
+    }
+
 cleanup:
+    if (stopped)
+        kill(pid, SIGCONT);
+    if (fd_path >= 0)
+        close(fd_path);
     if (fd_tree >= 0)
         close(fd_tree);
     if (fd_mntns >= 0)
         close(fd_mntns);
+    if (pidfd >= 0)
+        close(pidfd);
     free(hide_paths);
     return rc;
 }

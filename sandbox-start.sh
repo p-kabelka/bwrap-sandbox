@@ -11,8 +11,21 @@
 
 set -euo pipefail
 
-SESSIONS_FILE="/tmp/sandbox-info.json"
+SESSIONS_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR not set}/sandbox-info.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Check if TIOCSTI is blocked at the kernel level.
+# On kernels >= 6.2, dev.tty.legacy_tiocsti defaults to 0.
+# When it is not 0, use --new-session to prevent TIOCSTI keypress injection.
+# --new-session breaks Ctrl+C forwarding, so it is only used as a fallback.
+BWRAP_SESSION_ARGS=()
+TIOCSTI_VAL=$(sysctl --values dev.tty.legacy_tiocsti 2>/dev/null || echo "unknown")
+if [[ "$TIOCSTI_VAL" != "0" ]]; then
+    echo "Warning: dev.tty.legacy_tiocsti is '$TIOCSTI_VAL' (not 0)" >&2
+    echo "  Using --new-session (Ctrl+C will terminate the sandbox instead of forwarding)." >&2
+    echo "  To avoid this: sudo sysctl -w dev.tty.legacy_tiocsti=0" >&2
+    BWRAP_SESSION_ARGS+=(--new-session)
+fi
 
 # Parse arguments
 SESSION_NAME=""
@@ -71,6 +84,9 @@ cleanup() {
     [[ -z "$CLEANED_UP" ]] || return
     CLEANED_UP=1
 
+    kill "$START_TIME_PID" 2>/dev/null || true
+    wait "$START_TIME_PID" 2>/dev/null || true
+
     # Unregister session
     (
         flock -x 9
@@ -96,11 +112,32 @@ echo "In another terminal:"
 echo "  sudo $SCRIPT_DIR/sandbox-grant.sh $SESSION_NAME /path/to/grant"
 echo "---"
 
+# Background: once bwrap writes the info file, record the child's start time
+# in the session registry for PID-reuse detection.
+(
+    while [[ ! -s "$BWRAP_INFO" ]]; do sleep 0.05; done
+    PID=$(jq -r '.["child-pid"]' "$BWRAP_INFO")
+    START_TIME=$(awk '{print $22}' "/proc/$PID/stat" 2>/dev/null || echo "")
+    if [[ -n "$START_TIME" ]]; then
+        (
+            flock -x 9
+            if [[ -s "$SESSIONS_FILE" ]]; then
+                jq --arg name "$SESSION_NAME" --arg st "$START_TIME" \
+                    '.[$name].start_time = $st' "$SESSIONS_FILE" \
+                    > "${SESSIONS_FILE}.tmp"
+                mv "${SESSIONS_FILE}.tmp" "$SESSIONS_FILE"
+            fi
+        ) 9>"${SESSIONS_FILE}.lock"
+    fi
+) &
+START_TIME_PID=$!
+
 bwrap \
     --unshare-all \
     --share-net \
     --die-with-parent \
     --cap-drop ALL \
+    "${BWRAP_SESSION_ARGS[@]}" \
     \
     --ro-bind /usr /usr \
     --symlink usr/lib /lib \
@@ -125,4 +162,5 @@ bwrap \
     \
     --info-fd 3 \
     --chdir "$INITIAL_BIND" \
-    -- /bin/bash 3>"$BWRAP_INFO"
+    --bind "$BWRAP_INFO" /tmp/.sandbox-lock \
+    -- bash -c 'exec 8>/tmp/.sandbox-lock; flock -x 8; exec bash' 3>"$BWRAP_INFO"

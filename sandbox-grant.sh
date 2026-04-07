@@ -11,6 +11,7 @@
 #   --ro              Mount read-only
 #   --hide <relpath>  Hide a relative path within the mounted directory
 #                     (can be specified multiple times)
+#   --user USER       Sandbox owner (default: $SUDO_USER; required if not using sudo)
 #
 # Examples:
 #   sudo ./sandbox-grant.sh myproject /home/user/project
@@ -19,11 +20,15 @@
 
 set -euo pipefail
 
-SESSIONS_FILE="/tmp/sandbox-info.json"
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "Error: must be run as root" >&2
+    exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Parse options
 READONLY=""
+SANDBOX_USER=""
 HIDE_ARGS=()
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
@@ -36,6 +41,10 @@ while [[ $# -gt 0 ]]; do
             HIDE_ARGS+=(-H "$2")
             shift 2
             ;;
+        --user)
+            SANDBOX_USER="$2"
+            shift 2
+            ;;
         *)
             POSITIONAL+=("$1")
             shift
@@ -44,9 +53,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#POSITIONAL[@]} -lt 2 || ${#POSITIONAL[@]} -gt 3 ]]; then
-    echo "Usage: sudo $0 [--ro] [--hide path]... <session> <path> [sandbox-path]" >&2
+    echo "Usage: $0 [--ro] [--hide path]... [--user USER] <session> <path> [sandbox-path]" >&2
     exit 1
 fi
+
+# Resolve the sandbox owner's runtime directory
+SANDBOX_USER="${SANDBOX_USER:-${SUDO_USER:-}}"
+if [[ -z "$SANDBOX_USER" ]]; then
+    echo "Error: cannot determine sandbox owner; use --user USER" >&2
+    exit 1
+fi
+SESSIONS_FILE="/run/user/$(id -u "$SANDBOX_USER")/sandbox-info.json"
 
 SESSION_NAME="${POSITIONAL[0]}"
 HOST_PATH="${POSITIONAL[1]}"
@@ -55,12 +72,6 @@ SANDBOX_PATH="${POSITIONAL[2]:-$HOST_PATH}"
 if [[ ! -e "$HOST_PATH" ]]; then
     echo "Error: $HOST_PATH does not exist" >&2
     exit 1
-fi
-
-# If the host path is a symlink, resolve it so we mount the real target.
-# The sandbox path stays as the original (symlink) path.
-if [[ -L "$HOST_PATH" ]]; then
-    HOST_PATH="$(realpath "$HOST_PATH")"
 fi
 
 if [[ ! -x "$SCRIPT_DIR/sandbox-mount" ]]; then
@@ -96,6 +107,23 @@ PID=$(jq -r '.["child-pid"]' "$BWRAP_INFO")
 
 if [[ ! -d "/proc/$PID" ]]; then
     echo "Error: sandbox process $PID is not running" >&2
+    exit 1
+fi
+
+# Verify PID has not been recycled
+EXPECTED_START=$(echo "$SESSION_DATA" | jq -r '.start_time // empty')
+if [[ -n "$EXPECTED_START" ]]; then
+    CURRENT_START=$(awk '{print $22}' "/proc/$PID/stat" 2>/dev/null)
+    if [[ "$CURRENT_START" != "$EXPECTED_START" ]]; then
+        echo "Error: PID $PID has been recycled (start time mismatch)" >&2
+        exit 1
+    fi
+fi
+
+# Verify sandbox is running via flock (survives SIGKILL)
+if flock -n 9 9<"$BWRAP_INFO" 2>/dev/null; then
+    flock -u 9
+    echo "Error: sandbox is not running (lock not held)" >&2
     exit 1
 fi
 
