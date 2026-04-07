@@ -163,4 +163,4 @@ bwrap \
     --info-fd 3 \
     --chdir "$INITIAL_BIND" \
     --bind "$BWRAP_INFO" /tmp/.sandbox-lock \
-    -- bash -c 'exec 8>/tmp/.sandbox-lock; flock -x 8; exec bash' 3>"$BWRAP_INFO"
+    -- bash -c 'exec 8</tmp/.sandbox-lock; flock -x 8; exec bash' 3>"$BWRAP_INFO"
