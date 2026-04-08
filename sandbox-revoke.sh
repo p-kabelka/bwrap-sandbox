@@ -128,7 +128,7 @@ done
 
 RELATIVE="${SANDBOX_PATH#"$HOME_PREFIX"/}"
 if [[ "$RELATIVE" != "$SANDBOX_PATH" ]]; then
-    CURRENT="$(dirname "$RELATIVE")"
+    CURRENT="$RELATIVE"
     while [[ -n "$CURRENT" && "$CURRENT" != "." ]]; do
         rmdir "$SANDBOX_HOME/$CURRENT" 2>/dev/null || break
         CURRENT="$(dirname "$CURRENT")"
