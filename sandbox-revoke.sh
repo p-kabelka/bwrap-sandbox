@@ -89,24 +89,47 @@ if flock -n 9 9<"$BWRAP_INFO" 2>/dev/null; then
     exit 1
 fi
 
-# Unmount
-nsenter -t "$PID" --mount -- umount "$SANDBOX_PATH"
+# Freeze the sandbox to prevent it from observing intermediate states
+# (e.g., reading a hidden path after its tmpfs/devnull mask is unmounted
+# but before the base mount is removed).
+kill -STOP "$PID"
+trap 'kill -CONT "$PID" 2>/dev/null' EXIT
 
-# Clean up empty mount point directories on the host-backed filesystem,
-# but only if the corresponding sandbox path has no remaining mounts
-# (e.g., a hide mount may still be stacked at the same path).
-is_sandbox_mountpoint() {
-    awk -v path="$1" '$5 == path { found=1; exit } END { exit !found }' \
-        "/proc/$PID/mountinfo" 2>/dev/null
-}
+# Unmount child mounts first (hide mounts, grants on top of hides),
+# then the base mount. Without this, umount fails with "target is busy".
+# Read mountinfo from the host; only nsenter for the actual umount calls.
+# mountinfo field 5 is the mount path; list sub-mounts deepest-first.
+# Collect mount paths under SANDBOX_PATH (deepest first for unmounting).
+mapfile -t MOUNTS < <(
+    awk -v base="$SANDBOX_PATH" \
+        '$5 == base || index($5, base "/") == 1 { print $5 }' \
+        "/proc/$PID/mountinfo" \
+        | sort -r
+)
+
+for mnt in "${MOUNTS[@]}"; do
+    nsenter -t "$PID" --mount -- umount "$mnt"
+done
+
+kill -CONT "$PID"
+
+# Clean up empty mount point directories/files on the host-backed filesystem.
+# Process deepest-first (MOUNTS is already sorted that way), then walk up
+# from SANDBOX_PATH removing empty parent directories.
+for mnt in "${MOUNTS[@]}"; do
+    RELATIVE="${mnt#"$HOME_PREFIX"/}"
+    [[ "$RELATIVE" == "$mnt" ]] && continue
+    if [[ -d "$SANDBOX_HOME/$RELATIVE" ]]; then
+        rmdir "$SANDBOX_HOME/$RELATIVE" 2>/dev/null || true
+    else
+        rm -f "$SANDBOX_HOME/$RELATIVE" 2>/dev/null || true
+    fi
+done
 
 RELATIVE="${SANDBOX_PATH#"$HOME_PREFIX"/}"
 if [[ "$RELATIVE" != "$SANDBOX_PATH" ]]; then
-    CURRENT="$RELATIVE"
+    CURRENT="$(dirname "$RELATIVE")"
     while [[ -n "$CURRENT" && "$CURRENT" != "." ]]; do
-        if is_sandbox_mountpoint "$HOME_PREFIX/$CURRENT"; then
-            break
-        fi
         rmdir "$SANDBOX_HOME/$CURRENT" 2>/dev/null || break
         CURRENT="$(dirname "$CURRENT")"
     done
