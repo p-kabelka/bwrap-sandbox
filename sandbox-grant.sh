@@ -141,6 +141,7 @@ else
     mkdir -p "$(dirname "$SANDBOX_HOME/$RELATIVE")"
     touch "$SANDBOX_HOME/$RELATIVE"
 fi
+chown -R "$SANDBOX_USER:$SANDBOX_USER" "$SANDBOX_HOME"
 
 # Build sandbox-mount arguments
 MOUNT_ARGS=()
